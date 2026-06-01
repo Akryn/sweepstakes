@@ -1,20 +1,27 @@
 import os
 import requests
 import pandas as pd
+import pulp
+import matplotlib.pyplot as plt
 
 
 API_KEY = os.environ.get('THE_ODDS_API_KEY')
 # Remeber to restart computer after setting as environment variable.
 
-BASE_URL = 'https://api.the-odds-api.com/v4/sports'
-SPORT = 'soccer_fifa_world_cup_winner'
-REGIONS = 'uk'
-MARKETS = 'outrights'
+NUMBER_OF_PLAYERS = 20
 
-ACCEPTABLE_BOOMKAKERS_ORDERED_LIST = ['bet365', 'skybet', 'paddypower', 'williamhill']
+ACCEPTABLE_BOOMKAKERS_ORDERED_LIST = [
+    'bet365', 'skybet', 'paddypower', 'williamhill']
 # Acceptable bookmakers in decreasing order of preference.
+# See: https://the-odds-api.com/sports-odds-data/bookmaker-apis.html#uk-bookmakers
 
 BOOKMAKERS = ','.join(ACCEPTABLE_BOOMKAKERS_ORDERED_LIST)
+
+REGIONS = 'uk'
+
+BASE_URL = 'https://api.the-odds-api.com/v4/sports'
+SPORT = 'soccer_fifa_world_cup_winner'
+MARKETS = 'outrights'
 
 if 'response' not in locals():
     response = requests.get(f'{BASE_URL}/{SPORT}/odds', params={
@@ -43,8 +50,9 @@ for bookmaker in ACCEPTABLE_BOOMKAKERS_ORDERED_LIST:
 if 'chosen_bookmaker' not in locals():
     print('No acceptable bookmakers found.')
 
+# Flatten with pandas.
 df = pd.json_normalize(
-    response_json, 
+    response_json,
     record_path=['bookmakers', 'markets', 'outcomes'],
 )
 
@@ -54,3 +62,106 @@ df.columns = ['country', 'decimal_odds']
 df['unscaled_prob'] = df['decimal_odds'].apply(lambda x: 1/x)
 prob_normalisation_factor = sum(df['unscaled_prob'])
 df['prob'] = df['unscaled_prob'] / prob_normalisation_factor
+
+prob_dict = df.set_index('country').to_dict()['prob']
+
+
+# Optimisation
+def partition(samples, num_groups):
+    """
+    Splits samples into groups to minimise the difference between the largest 
+    and smallest group totals.
+
+    Parameters
+    ----------
+    samples : dict
+        Dictionary of {sample_name: utility_value}.
+    num_groups : int
+        Number of groups to split into (e.g., 12).
+    """
+    names = list(samples.keys())
+    utilities = list(samples.values())
+    num_items = len(names)
+
+    # Initialise the optimisation problem.
+    prob = pulp.LpProblem("Partitioning", pulp.LpMinimize)
+
+    # Define decision variables:
+    # x[i, j] = 1 if item i is assigned to group j, else 0.
+    x = pulp.LpVariable.dicts("assign",
+                              ((i, j) for i in range(num_items)
+                               for j in range(num_groups)),
+                              cat='Binary')
+
+    # Variables to track the boundary weights of the groups.
+    max_utility = pulp.LpVariable("max_utility", lowBound=0)
+    min_utility = pulp.LpVariable("min_utility", lowBound=0)
+
+    # Objective Function: Minimise the difference between min and max utlility.
+    prob += max_utility - min_utility
+
+    # Constraints:
+    # Every sample must belong to exactly one group.
+    for i in range(num_items):
+        prob += pulp.lpSum(x[i, j] for j in range(num_groups)) == 1
+
+    # Total utility for any group must be within the min and max group utilities.
+    for j in range(num_groups):
+        group_total = pulp.lpSum(x[i, j] * utilities[i]
+                                 for i in range(num_items))
+        prob += group_total <= max_utility
+        prob += group_total >= min_utility
+
+    # print(prob)
+
+    # Solve:
+    prob.solve(pulp.PULP_CBC_CMD(
+        timeLimit=30,  # Exact solution in general will not exist.
+        # gapRel=0.05,
+        # Won't display in an IPython console. Run from terminal instead.
+        msg=True
+    ))
+    # prob_status = pulp.LpStatus[prob.status]
+    sol_status = pulp.LpSolution[prob.sol_status]
+    sol_time = prob.solutionTime
+
+    # Reconstruct the groups
+    groups = [[] for _ in range(num_groups)]
+    group_totals = [0] * num_groups
+
+    for i in range(num_items):
+        for j in range(num_groups):
+            if pulp.value(x[i, j]) == 1:
+                groups[j].append((names[i], utilities[i]))
+                group_totals[j] += utilities[i]
+                break
+
+    return sol_status, sol_time, groups, group_totals
+
+
+sol_status, sol_time, groups, group_totals = partition(prob_dict, 8)
+
+# https://github.com/coin-or/pulp/blob/master/pulp/constants.py
+if sol_status == pulp.LpSolution[pulp.LpSolutionOptimal]:
+    print('Optimal solution found. If gapRel is set, the solution is within the gap.')
+elif sol_status == pulp.LpSolution[pulp.LpSolutionIntegerFeasible]:
+    print('Timeout: Sub-optimal solution found.')
+else:
+    print('Error: Solver stopped or failed without finding any valid solution.')
+
+# Plotting
+plt.figure()
+plt.bar(list(range(len(group_totals))), group_totals)
+plt.xlabel('Group')
+plt.ylabel('Combined Prboability of Winning')
+
+# For World Cup 2026 at the time of writing, as soon as num_groups > 7, we cannot find a good solution.
+# For 8 teams, Spain and France individually already have more probability than what would be the maximum to enable "fairness".
+
+group_cat_names = []
+for i in range(len(groups)):
+    for j in range(len(groups[i])):
+        if j == 0:
+            group_cat_names.append(groups[i][j][0])
+        else:
+            group_cat_names[i] = group_cat_names[i] + ', ' + groups[i][j][0]
