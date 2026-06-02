@@ -6,9 +6,11 @@ import matplotlib.pyplot as plt
 
 
 API_KEY = os.environ.get('THE_ODDS_API_KEY')
-# Remeber to restart computer after setting as environment variable.
+# You must have an API key from https://the-odds-api.com/ set as an environment
+# variable called 'THE_ODDS_API_KEY'. Restart computer after setting.
 
-NUMBER_OF_PLAYERS = 20
+NUMBER_OF_PLAYERS = 7
+# Total number of players in the sweepstakes.
 
 ACCEPTABLE_BOOMKAKERS_ORDERED_LIST = [
     'bet365', 'skybet', 'paddypower', 'williamhill']
@@ -18,6 +20,7 @@ ACCEPTABLE_BOOMKAKERS_ORDERED_LIST = [
 BOOKMAKERS = ','.join(ACCEPTABLE_BOOMKAKERS_ORDERED_LIST)
 
 REGIONS = 'uk'
+# Region for bookmakers. Will be ignored in favour of BOOKMAKERS.
 
 BASE_URL = 'https://api.the-odds-api.com/v4/sports'
 SPORT = 'soccer_fifa_world_cup_winner'
@@ -60,6 +63,8 @@ df.columns = ['country', 'decimal_odds']
 
 # Calculate probability from decimal odds.
 df['unscaled_prob'] = df['decimal_odds'].apply(lambda x: 1/x)
+
+# Bookies' odds don't sum to one.
 prob_normalisation_factor = sum(df['unscaled_prob'])
 df['prob'] = df['unscaled_prob'] / prob_normalisation_factor
 
@@ -118,8 +123,8 @@ def partition(samples, num_groups):
     prob.solve(pulp.PULP_CBC_CMD(
         timeLimit=30,  # Exact solution in general will not exist.
         # gapRel=0.05,
-        # Won't display in an IPython console. Run from terminal instead.
-        msg=True
+        msg=False
+        # If True, won't display in an IPython console. Run from terminal instead.
     ))
     # prob_status = pulp.LpStatus[prob.status]
     sol_status = pulp.LpSolution[prob.sol_status]
@@ -139,7 +144,8 @@ def partition(samples, num_groups):
     return sol_status, sol_time, groups, group_totals
 
 
-sol_status, sol_time, groups, group_totals = partition(prob_dict, 8)
+sol_status, sol_time, groups, group_totals = partition(
+    prob_dict, NUMBER_OF_PLAYERS)
 
 # https://github.com/coin-or/pulp/blob/master/pulp/constants.py
 if sol_status == pulp.LpSolution[pulp.LpSolutionOptimal]:
@@ -152,16 +158,13 @@ else:
 # Plotting
 plt.figure()
 plt.bar(list(range(len(group_totals))), group_totals)
-plt.xlabel('Group')
+plt.xlabel('Grouping')
 plt.ylabel('Combined Prboability of Winning')
 
 # For World Cup 2026 at the time of writing, as soon as num_groups > 7, we cannot find a good solution.
 # For 8 teams, Spain and France individually already have more probability than what would be the maximum to enable "fairness".
 
-group_cat_names = []
-for i in range(len(groups)):
-    for j in range(len(groups[i])):
-        if j == 0:
-            group_cat_names.append(groups[i][j][0])
-        else:
-            group_cat_names[i] = group_cat_names[i] + ', ' + groups[i][j][0]
+group_names = [", ".join(item[0] for item in group) for group in groups]
+
+for name, total in zip(group_names, group_totals):
+    print(f"{name} ({total})")
